@@ -1,111 +1,164 @@
 import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+
+import 'package:location/location.dart';
+
+import 'package:geoflutterfire/geoflutterfire.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:rxdart/rxdart.dart';
+import 'dart:async';
 
 void main() => runApp(MyApp());
 
 class MyApp extends StatelessWidget {
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // Try running your application with "flutter run". You'll see the
-        // application has a blue toolbar. Then, without quitting the app, try
-        // changing the primarySwatch below to Colors.green and then invoke
-        // "hot reload" (press "r" in the console where you ran "flutter run",
-        // or simply save your changes to "hot reload" in a Flutter IDE).
-        // Notice that the counter didn't reset back to zero; the application
-        // is not restarted.
-        primarySwatch: Colors.blue,
-      ),
-      home: MyHomePage(title: 'Flutter Demo Home Page'),
-    );
+        home: Scaffold(
+      body: FireMap(),
+    ));
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  MyHomePage({Key key, this.title}) : super(key: key);
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
-  @override
-  _MyHomePageState createState() => _MyHomePageState();
+class FireMap extends StatefulWidget {
+  State createState() => FireMapState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class FireMapState extends State<FireMap> {
+  GoogleMapController mapController;
+  Location location = new Location();
 
-  void _incrementCounter() {
+  Firestore firestore = Firestore.instance;
+  Geoflutterfire geo = Geoflutterfire();
+
+  // Stateful Data
+  BehaviorSubject<double> radius = BehaviorSubject(seedValue: 100.0);
+  Stream<dynamic> query;
+
+  // Subscription
+  StreamSubscription subscription;
+
+  build(context) {
+    return Stack(children: [
+      GoogleMap(
+        initialCameraPosition:
+            CameraPosition(target: LatLng(24.142, -110.321), zoom: 15),
+        onMapCreated: _onMapCreated,
+        myLocationEnabled: true,
+        mapType: MapType.hybrid,
+        compassEnabled: true,
+        trackCameraPosition: true,
+      ),
+      Positioned(
+          bottom: 50,
+          right: 10,
+          child: FlatButton(
+              child: Icon(Icons.pin_drop, color: Colors.white),
+              color: Colors.green,
+              onPressed: _addGeoPoint)),
+      Positioned(
+          bottom: 50,
+          left: 10,
+          child: Slider(
+            min: 100.0,
+            max: 500.0,
+            divisions: 4,
+            value: radius.value,
+            label: 'Radius ${radius.value}km',
+            activeColor: Colors.green,
+            inactiveColor: Colors.green.withOpacity(0.2),
+            onChanged: _updateQuery,
+          ))
+    ]);
+  }
+
+  // Map Created Lifecycle Hook
+  _onMapCreated(GoogleMapController controller) {
+    _startQuery();
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      mapController = controller;
+    });
+  }
+
+  _addMarker() {
+    var marker = MarkerOptions(
+        position: mapController.cameraPosition.target,
+        icon: BitmapDescriptor.defaultMarker,
+        infoWindowText: InfoWindowText('Magic Marker', '🍄🍄🍄'));
+
+    mapController.addMarker(marker);
+  }
+
+  _animateToUser() async {
+    var pos = await location.getLocation();
+    mapController.animateCamera(CameraUpdate.newCameraPosition(CameraPosition(
+      target: LatLng(pos['latitude'], pos['longitude']),
+      zoom: 17.0,
+    )));
+  }
+
+  // Set GeoLocation Data
+  Future<DocumentReference> _addGeoPoint() async {
+    var pos = await location.getLocation();
+    GeoFirePoint point =
+        geo.point(latitude: pos['latitude'], longitude: pos['longitude']);
+    return firestore
+        .collection('locations')
+        .add({'position': point.data, 'name': 'Yay I can be queried!'});
+  }
+
+  void _updateMarkers(List<DocumentSnapshot> documentList) {
+    print(documentList);
+    mapController.clearMarkers();
+    documentList.forEach((DocumentSnapshot document) {
+      GeoPoint pos = document.data['position']['geopoint'];
+      double distance = document.data['distance'];
+      var marker = MarkerOptions(
+          position: LatLng(pos.latitude, pos.longitude),
+          icon: BitmapDescriptor.defaultMarker,
+          infoWindowText: InfoWindowText(
+              'Magic Marker', '$distance kilometers from query center'));
+
+      mapController.addMarker(marker);
+    });
+  }
+
+  _startQuery() async {
+    // Get users location
+    var pos = await location.getLocation();
+    double lat = pos['latitude'];
+    double lng = pos['longitude'];
+
+    // Make a referece to firestore
+    var ref = firestore.collection('locations');
+    GeoFirePoint center = geo.point(latitude: lat, longitude: lng);
+
+    // subscribe to query
+    subscription = radius.switchMap((rad) {
+      return geo.collection(collectionRef: ref).within(
+          center: center, radius: rad, field: 'position', strictMode: true);
+    }).listen(_updateMarkers);
+  }
+
+  _updateQuery(value) {
+    final zoomMap = {
+      100.0: 12.0,
+      200.0: 10.0,
+      300.0: 7.0,
+      400.0: 6.0,
+      500.0: 5.0
+    };
+    final zoom = zoomMap[value];
+    mapController.moveCamera(CameraUpdate.zoomTo(zoom));
+
+    setState(() {
+      radius.add(value);
     });
   }
 
   @override
-  Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Invoke "debug painting" (press "p" in the console, choose the
-          // "Toggle Debug Paint" action from the Flutter Inspector in Android
-          // Studio, or the "Toggle Debug Paint" command in Visual Studio Code)
-          // to see the wireframe for each widget.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            Text(
-              'You have pushed the button this many times:',
-            ),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headline4,
-            ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
-    );
+  dispose() {
+    subscription.cancel();
+    super.dispose();
   }
 }
